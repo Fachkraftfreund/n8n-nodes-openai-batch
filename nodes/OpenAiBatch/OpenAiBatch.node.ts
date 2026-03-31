@@ -65,6 +65,43 @@ interface BatchStatus {
 	metadata: Record<string, string> | null;
 }
 
+const RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503, 504]);
+
+function getHttpStatusCode(error: unknown): number | null {
+	if (!error || typeof error !== 'object') return null;
+	const err = error as Record<string, unknown>;
+	for (const key of ['httpCode', 'statusCode'] as const) {
+		const val = err[key];
+		if (typeof val === 'number') return val;
+		if (typeof val === 'string') { const n = parseInt(val, 10); if (n) return n; }
+	}
+	return null;
+}
+
+async function retryWithBackoff<T>(
+	fn: () => Promise<T>,
+	maxRetries = 3,
+	baseDelay = 1000,
+	maxDelay = 30000,
+): Promise<T> {
+	let lastError: unknown;
+	for (let attempt = 0; attempt <= maxRetries; attempt++) {
+		try {
+			return await fn();
+		} catch (error) {
+			lastError = error;
+			const statusCode = getHttpStatusCode(error);
+			if (attempt >= maxRetries || !statusCode || !RETRYABLE_STATUS_CODES.has(statusCode)) {
+				throw error;
+			}
+			// Exponential backoff with jitter (±25%)
+			const delay = Math.min(baseDelay * Math.pow(2, attempt), maxDelay) * (0.75 + Math.random() * 0.5);
+			await new Promise(resolve => setTimeout(resolve, delay));
+		}
+	}
+	throw lastError;
+}
+
 export class OpenAiBatch implements INodeType {
 	description: INodeTypeDescription = {
 		displayName: 'OpenAI Batch',
@@ -596,7 +633,7 @@ export class OpenAiBatch implements INodeType {
 			const chunkIndex = Math.floor(chunkStart / maxBatchSize);
 
 			// Upload JSONL file
-			const uploadResponse = await this.helpers.request({
+			const uploadResponse = await retryWithBackoff(() => this.helpers.request({
 				method: 'POST',
 				url: 'https://api.openai.com/v1/files',
 				headers: {
@@ -613,7 +650,7 @@ export class OpenAiBatch implements INodeType {
 					},
 				},
 				json: true,
-			});
+			}));
 
 			const inputFileId = uploadResponse.id;
 
@@ -628,7 +665,7 @@ export class OpenAiBatch implements INodeType {
 				batchCreateBody.metadata = { ...metadata, chunk: String(chunkIndex) };
 			}
 
-			const batchResponse = await this.helpers.httpRequestWithAuthentication.call(
+			const batchResponse = await retryWithBackoff(() => this.helpers.httpRequestWithAuthentication.call(
 				this,
 				'openAiApi',
 				{
@@ -639,7 +676,7 @@ export class OpenAiBatch implements INodeType {
 					},
 					body: batchCreateBody,
 				},
-			) as BatchStatus;
+			)) as BatchStatus;
 
 			batches.push({
 				batchId: batchResponse.id,
@@ -683,14 +720,14 @@ export class OpenAiBatch implements INodeType {
 			for (const batch of batches) {
 				if (completedBatches.has(batch.batchId)) continue;
 
-				const batchStatus = await this.helpers.httpRequestWithAuthentication.call(
+				const batchStatus = await retryWithBackoff(() => this.helpers.httpRequestWithAuthentication.call(
 					this,
 					'openAiApi',
 					{
 						method: 'GET',
 						url: `https://api.openai.com/v1/batches/${batch.batchId}`,
 					},
-				) as BatchStatus;
+				)) as BatchStatus;
 
 				batch.status = batchStatus.status;
 				batch.outputFileId = batchStatus.output_file_id;
@@ -700,7 +737,7 @@ export class OpenAiBatch implements INodeType {
 
 					// Download results for this batch
 					if (batchStatus.output_file_id) {
-						const outputFileResponse = await this.helpers.httpRequestWithAuthentication.call(
+						const outputFileResponse = await retryWithBackoff(() => this.helpers.httpRequestWithAuthentication.call(
 							this,
 							'openAiApi',
 							{
@@ -709,7 +746,7 @@ export class OpenAiBatch implements INodeType {
 								returnFullResponse: true,
 								json: false,
 							},
-						);
+						));
 
 						// Extract the content string from the response
 						let outputContent: string;
@@ -802,7 +839,7 @@ export class OpenAiBatch implements INodeType {
 				if (!originalRequest) return;
 
 				try {
-					const syncResponse = await this.helpers.httpRequestWithAuthentication.call(
+					const syncResponse = await retryWithBackoff(() => this.helpers.httpRequestWithAuthentication.call(
 						this,
 						'openAiApi',
 						{
@@ -813,7 +850,7 @@ export class OpenAiBatch implements INodeType {
 							},
 							body: originalRequest.body,
 						},
-					) as Record<string, unknown>;
+					)) as Record<string, unknown>;
 
 					// Convert sync response to batch response format
 					resultMap.set(customId, {
