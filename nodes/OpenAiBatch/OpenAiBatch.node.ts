@@ -559,12 +559,6 @@ export class OpenAiBatch implements INodeType {
 			batchRequests.push(request);
 		}
 
-		// Split requests into chunks based on maxBatchSize
-		const chunks: BatchRequest[][] = [];
-		for (let i = 0; i < batchRequests.length; i += maxBatchSize) {
-			chunks.push(batchRequests.slice(i, i + maxBatchSize));
-		}
-
 		// Parse metadata once
 		let metadata: Record<string, string> | undefined;
 		try {
@@ -584,10 +578,22 @@ export class OpenAiBatch implements INodeType {
 		}
 		const batches: BatchInfo[] = [];
 
-		// Create batches for each chunk
-		for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
-			const chunk = chunks[chunkIndex];
-			const jsonlContent = chunk.map((req) => JSON.stringify(req)).join('\n');
+		// Create batches using index-based chunking (no intermediate chunk arrays)
+		for (let chunkStart = 0; chunkStart < batchRequests.length; chunkStart += maxBatchSize) {
+			const chunkEnd = Math.min(chunkStart + maxBatchSize, batchRequests.length);
+
+			// Build JSONL buffer directly — avoids intermediate string array and joined string
+			const buffers: Buffer[] = [];
+			const customIds: string[] = [];
+			for (let j = chunkStart; j < chunkEnd; j++) {
+				if (j > chunkStart) buffers.push(Buffer.from('\n'));
+				buffers.push(Buffer.from(JSON.stringify(batchRequests[j])));
+				customIds.push(batchRequests[j].custom_id);
+			}
+			const jsonlBuffer = Buffer.concat(buffers);
+			buffers.length = 0; // release individual buffers
+
+			const chunkIndex = Math.floor(chunkStart / maxBatchSize);
 
 			// Upload JSONL file
 			const uploadResponse = await this.helpers.request({
@@ -599,7 +605,7 @@ export class OpenAiBatch implements INodeType {
 				formData: {
 					purpose: 'batch',
 					file: {
-						value: Buffer.from(jsonlContent, 'utf-8'),
+						value: jsonlBuffer,
 						options: {
 							filename: `batch_requests_${chunkIndex}.jsonl`,
 							contentType: 'application/jsonl',
@@ -637,11 +643,17 @@ export class OpenAiBatch implements INodeType {
 
 			batches.push({
 				batchId: batchResponse.id,
-				customIds: chunk.map((r) => r.custom_id),
+				customIds,
 				status: batchResponse.status,
 				outputFileId: null,
 			});
 		}
+
+		// Build lookup map for O(1) fallback access, then release the array
+		const requestLookup = fallbackDeadline > 0
+			? new Map(batchRequests.map(r => [r.custom_id, r]))
+			: null;
+		batchRequests.length = 0;
 
 		// Poll for batch completion
 		const startTime = Date.now();
@@ -728,18 +740,16 @@ export class OpenAiBatch implements INodeType {
 						}
 
 						const outputLines = outputContent.trim().split('\n');
-						const results: BatchResponse[] = outputLines.map((line: string, lineIndex: number) => {
+						for (let lineIndex = 0; lineIndex < outputLines.length; lineIndex++) {
+							let result: BatchResponse;
 							try {
-								return JSON.parse(line);
+								result = JSON.parse(outputLines[lineIndex]);
 							} catch (e) {
 								throw new NodeOperationError(
 									this.getNode(),
-									`Failed to parse batch result line ${lineIndex + 1}: ${e instanceof Error ? e.message : 'Unknown error'}. Content: ${line.substring(0, 200)}`,
+									`Failed to parse batch result line ${lineIndex + 1}: ${e instanceof Error ? e.message : 'Unknown error'}. Content: ${outputLines[lineIndex].substring(0, 200)}`,
 								);
 							}
-						});
-
-						for (const result of results) {
 							resultMap.set(result.custom_id, result);
 						}
 					}
@@ -788,7 +798,7 @@ export class OpenAiBatch implements INodeType {
 
 			// Run incomplete requests in parallel
 			const syncPromises = incompleteCustomIds.map(async (customId) => {
-				const originalRequest = batchRequests.find((r) => r.custom_id === customId);
+				const originalRequest = requestLookup!.get(customId);
 				if (!originalRequest) return;
 
 				try {
@@ -983,7 +993,7 @@ export class OpenAiBatch implements INodeType {
 							debug: {
 								expectedCustomId: customId,
 								resultMapSize: resultMap.size,
-								availableCustomIds: Array.from(resultMap.keys()),
+								sampleCustomIds: Array.from(resultMap.keys()).slice(0, 10),
 								batchStatuses: batches.map(b => ({ id: b.batchId, status: b.status })),
 							},
 						},
