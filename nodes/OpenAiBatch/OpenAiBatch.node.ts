@@ -659,6 +659,67 @@ export class OpenAiBatch implements INodeType {
 			outputFileId: string | null;
 		}
 		const batches: BatchInfo[] = [];
+		const processingMode = this.getNodeParameter('processingMode', 0, 'batch') as string;
+
+		if (processingMode === 'direct') {
+			// Direct mode: send all requests without batching
+			const directPromises = batchRequests.map(async (request) => {
+				try {
+					const syncResponse = await retryWithBackoff(() => this.helpers.httpRequestWithAuthentication.call(
+						this,
+						'openAiApi',
+						{
+							method: 'POST',
+							url: `https://api.openai.com${request.url}`,
+							headers: { 'Content-Type': 'application/json' },
+							body: request.body,
+						},
+					)) as Record<string, unknown>;
+
+					resultMap.set(request.custom_id, {
+						id: `sync-${request.custom_id}`,
+						custom_id: request.custom_id,
+						response: {
+							status_code: 200,
+							request_id: `sync-${request.custom_id}`,
+							body: syncResponse,
+						},
+						error: null,
+					});
+				} catch (error) {
+					let errorMessage = error instanceof Error ? error.message : 'Unknown error during direct request';
+					const debugInfo: string[] = [];
+					if (error && typeof error === 'object') {
+						const err = error as Record<string, unknown>;
+						if (err.httpCode) debugInfo.push(`HTTP ${err.httpCode}`);
+						if (err.description) debugInfo.push(`Description: ${err.description}`);
+						if (err.cause) debugInfo.push(`Cause: ${err.cause}`);
+					}
+					debugInfo.push(`URL: https://api.openai.com${request.url}`);
+					debugInfo.push(`Body: ${JSON.stringify(request.body).substring(0, 500)}`);
+					if (debugInfo.length > 0) {
+						errorMessage += ' | Debug: ' + debugInfo.join(' | ');
+					}
+
+					resultMap.set(request.custom_id, {
+						id: `sync-${request.custom_id}`,
+						custom_id: request.custom_id,
+						response: {
+							status_code: 500,
+							request_id: `sync-${request.custom_id}`,
+							body: {},
+						},
+						error: {
+							code: 'direct_error',
+							message: errorMessage,
+						},
+					});
+				}
+			});
+
+			await Promise.all(directPromises);
+			batchRequests.length = 0;
+		} else {
 
 		// Create batches using index-based chunking (no intermediate chunk arrays)
 		for (let chunkStart = 0; chunkStart < batchRequests.length; chunkStart += maxBatchSize) {
@@ -947,6 +1008,8 @@ export class OpenAiBatch implements INodeType {
 
 			await Promise.all(syncPromises);
 		}
+
+		} // end batch mode
 
 		// Create output items
 		const returnData: INodeExecutionData[] = [];
