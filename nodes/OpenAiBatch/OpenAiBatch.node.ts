@@ -144,6 +144,26 @@ export class OpenAiBatch implements INodeType {
 				],
 				default: 'chatCompletion',
 			},
+			{
+				displayName: 'Processing Mode',
+				name: 'processingMode',
+				type: 'options',
+				noDataExpression: true,
+				options: [
+					{
+						name: 'Batch',
+						value: 'batch',
+						description: 'Send requests via OpenAI Batch API (slower, 50% cheaper)',
+					},
+					{
+						name: 'Direct',
+						value: 'direct',
+						description: 'Send requests directly without batching (faster, standard pricing)',
+					},
+				],
+				default: 'batch',
+				description: 'Whether to use the batch API or send requests directly',
+			},
 			// Chat Completion Options
 			{
 				displayName: 'Model',
@@ -343,6 +363,11 @@ export class OpenAiBatch implements INodeType {
 						displayName: 'Max Batch Size',
 						name: 'maxBatchSize',
 						type: 'number',
+						displayOptions: {
+							show: {
+								'/processingMode': ['batch'],
+							},
+						},
 						default: 100,
 						description: 'Maximum number of requests per batch. Larger inputs will be split into multiple batches.',
 					},
@@ -350,6 +375,11 @@ export class OpenAiBatch implements INodeType {
 						displayName: 'Polling Interval (Seconds)',
 						name: 'pollingInterval',
 						type: 'number',
+						displayOptions: {
+							show: {
+								'/processingMode': ['batch'],
+							},
+						},
 						default: 30,
 						description: 'How often to check batch status',
 					},
@@ -357,6 +387,11 @@ export class OpenAiBatch implements INodeType {
 						displayName: 'Timeout (Minutes)',
 						name: 'timeout',
 						type: 'number',
+						displayOptions: {
+							show: {
+								'/processingMode': ['batch'],
+							},
+						},
 						default: 1440,
 						description: 'Maximum time to wait for batch completion (default 24 hours)',
 					},
@@ -364,6 +399,11 @@ export class OpenAiBatch implements INodeType {
 						displayName: 'Fallback Deadline (Minutes)',
 						name: 'fallbackDeadline',
 						type: 'number',
+						displayOptions: {
+							show: {
+								'/processingMode': ['batch'],
+							},
+						},
 						default: 0,
 						description: 'If set, cancel incomplete batches after this time and run remaining requests synchronously. 0 = disabled.',
 					},
@@ -371,6 +411,11 @@ export class OpenAiBatch implements INodeType {
 						displayName: 'Metadata',
 						name: 'metadata',
 						type: 'json',
+						displayOptions: {
+							show: {
+								'/processingMode': ['batch'],
+							},
+						},
 						default: '{}',
 						description: 'Optional metadata to attach to the batch',
 					},
